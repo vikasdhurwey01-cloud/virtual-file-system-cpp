@@ -1,0 +1,193 @@
+#include <iostream>
+#include <string>
+#include <vector>
+#include <map>
+#include <sstream>
+
+enum class FileType { FILE, DIRECTORY };
+
+struct Inode {
+    int id;
+    FileType type;
+    std::string name;
+    int size;
+    int parent_id;
+    std::vector<int> allocated_blocks;
+    std::map<std::string, int> children;
+};
+
+class VirtualFileSystem {
+private:
+    std::vector<std::string> disk_blocks;
+    std::vector<bool> free_bitmap;
+    std::map<int, Inode> inode_table;
+    int next_inode_id = 0;
+    int current_dir_id;
+
+    int allocateBlock() {
+        for (size_t i = 0; i < free_bitmap.size(); ++i) {
+            if (free_bitmap[i]) {
+                free_bitmap[i] = false;
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    int createInode(FileType type, std::string name, int parent) {
+        int id = next_inode_id++;
+        inode_table[id] = {id, type, name, 0, parent, {}, {}};
+        return id;
+    }
+
+public:
+    VirtualFileSystem(int total_blocks) {
+        disk_blocks.resize(total_blocks, "");
+        free_bitmap.resize(total_blocks, true);
+        current_dir_id = createInode(FileType::DIRECTORY, "/", -1);
+        std::cout << "[Kernel] Virtual File System Mounted. Disk size: " << total_blocks << " blocks.\n";
+    }
+
+    std::string getPath() {
+        if (current_dir_id == 0) return "/";
+        std::string path = "";
+        int temp_id = current_dir_id;
+        while (temp_id > 0) {
+            path = "/" + inode_table[temp_id].name + path;
+            temp_id = inode_table[temp_id].parent_id;
+        }
+        return path;
+    }
+
+    void mkdir(const std::string& name) {
+        if (inode_table[current_dir_id].children.count(name)) {
+            std::cout << "[Error] Directory or file '" << name << "' already exists.\n";
+            return;
+        }
+        int new_id = createInode(FileType::DIRECTORY, name, current_dir_id);
+        inode_table[current_dir_id].children[name] = new_id;
+        std::cout << "[VFS] Directory '" << name << "' created.\n";
+    }
+
+    void ls() {
+        std::cout << "[VFS] Contents of current directory:\n";
+        for (auto const& [name, id] : inode_table[current_dir_id].children) {
+            if (inode_table[id].type == FileType::DIRECTORY) {
+                std::cout << "  [DIR]  " << name << "\n";
+            } else {
+                std::cout << "  [FILE] " << name << " (" << inode_table[id].size << " bytes)\n";
+            }
+        }
+    }
+
+    void cd(const std::string& name) {
+        if (name == "..") {
+            if (inode_table[current_dir_id].parent_id != -1) {
+                current_dir_id = inode_table[current_dir_id].parent_id;
+            }
+            return;
+        }
+        if (inode_table[current_dir_id].children.count(name)) {
+            int target_id = inode_table[current_dir_id].children[name];
+            if (inode_table[target_id].type == FileType::DIRECTORY) {
+                current_dir_id = target_id;
+            } else {
+                std::cout << "[Error] '" << name << "' is not a directory.\n";
+            }
+        } else {
+            std::cout << "[Error] Directory '" << name << "' not found.\n";
+        }
+    }
+
+    void createFile(const std::string& name) {
+        if (inode_table[current_dir_id].children.count(name)) {
+            std::cout << "[Error] File or directory '" << name << "' already exists.\n";
+            return;
+        }
+        int new_id = createInode(FileType::FILE, name, current_dir_id);
+        inode_table[current_dir_id].children[name] = new_id;
+        std::cout << "[VFS] File '" << name << "' created.\n";
+    }
+
+    void writeFile(const std::string& name, const std::string& data) {
+        if (!inode_table[current_dir_id].children.count(name)) {
+            std::cout << "[Error] File '" << name << "' not found.\n";
+            return;
+        }
+        int file_id = inode_table[current_dir_id].children[name];
+        Inode& file = inode_table[file_id];
+        if (file.type != FileType::FILE) {
+            std::cout << "[Error] '" << name << "' is a directory.\n";
+            return;
+        }
+        int block_id = allocateBlock();
+        if (block_id != -1) {
+            file.allocated_blocks.push_back(block_id);
+            disk_blocks[block_id] = data;
+            file.size += data.length();
+            std::cout << "[Disk] Wrote " << data.length() << " bytes to physical block " << block_id << "\n";
+        } else {
+            std::cout << "[Error] Disk Full.\n";
+        }
+    }
+
+    void readFile(const std::string& name) {
+        if (!inode_table[current_dir_id].children.count(name)) {
+            std::cout << "[Error] File '" << name << "' not found.\n";
+            return;
+        }
+        int file_id = inode_table[current_dir_id].children[name];
+        Inode& file = inode_table[file_id];
+        if (file.type != FileType::FILE) {
+            std::cout << "[Error] '" << name << "' is a directory.\n";
+            return;
+        }
+        std::cout << "[Disk] Reading '" << name << "':\n>> ";
+        for (int b_id : file.allocated_blocks) {
+            std::cout << disk_blocks[b_id];
+        }
+        std::cout << "\n";
+    }
+};
+
+int main() {
+    VirtualFileSystem vfs(20);
+    std::cout << "Commands: ls, mkdir <dir>, cd <dir>, touch <file>, write <file> <data>, read <file>, exit\n\n";
+
+    std::string input;
+    while (true) {
+        std::cout << "admin@vfs:" << vfs.getPath() << "$ ";
+        if (!std::getline(std::cin, input)) break;
+        if (input.empty()) continue;
+
+        std::stringstream ss(input);
+        std::string cmd, arg1;
+        ss >> cmd;
+
+        if (cmd == "exit") {
+            break;
+        } else if (cmd == "ls") {
+            vfs.ls();
+        } else if (cmd == "mkdir") {
+            if (ss >> arg1) vfs.mkdir(arg1);
+        } else if (cmd == "cd") {
+            if (ss >> arg1) vfs.cd(arg1);
+        } else if (cmd == "touch") {
+            if (ss >> arg1) vfs.createFile(arg1);
+        } else if (cmd == "write") {
+            if (ss >> arg1) {
+                std::string data;
+                std::getline(ss >> std::ws, data);
+                if (!data.empty() && data.front() == '"' && data.back() == '"' && data.length() >= 2) {
+                    data = data.substr(1, data.length() - 2);
+                }
+                vfs.writeFile(arg1, data);
+            }
+        } else if (cmd == "read") {
+            if (ss >> arg1) vfs.readFile(arg1);
+        } else {
+            std::cout << "[Error] Unknown command.\n";
+        }
+    }
+    return 0;
+}
